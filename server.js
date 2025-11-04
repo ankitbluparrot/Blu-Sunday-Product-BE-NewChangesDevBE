@@ -17,7 +17,7 @@ const isVercel = !!process.env.VERCEL || !!process.env.NOW;
 app.use(express.json());
 
 // ✅ Centralized CORS configuration
-const allowedOrigin = "https://blusunday.netlify.app";
+const allowedOrigin = "https://blu-sunday-frontend.vercel.app";
 
 const corsOptions = {
   origin: allowedOrigin,
