@@ -6,7 +6,7 @@ const path = require("path");
 const passport = require("passport");
 const http = require("http");
 const socketIo = require("socket.io");
-
+const leaveRoute = require("./routes/leaveRoute.js");
 dotenv.config();
 
 const app = express();
@@ -39,6 +39,7 @@ app.use("/api/role-config", require("./routes/roleConfigRoutes"));
 app.use("/api/project", require("./routes/projectRoutes"));
 app.use("/api/templates", require("./routes/templateRoutes"));
 app.use("/api/task", require("./routes/taskRoutes"));
+app.use("/api/leaves", leaveRoute);
 app.use("/api/todaytask", require("./routes/todayTaskRoutes"));
 app.use("/api/comment", require("./routes/commentRoutes"));
 app.use("/api/audit", require("./routes/auditRoute"));
