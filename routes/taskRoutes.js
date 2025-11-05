@@ -9,6 +9,7 @@ const Comment = require('../models/Comment');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const {sendTaskEmail}=require('../services/emailServices');
 const router = express.Router();
 const { logActivity } = require("../middlewares/auditLogMiddleware");
 const { sendNotification, sendNotificationsToTeam, sendNotificationToManager } = require('../services/notificationService');
@@ -33,134 +34,187 @@ const storage = multer.diskStorage({
 const upload = multer({ storage: storage });
 
 // create task
-router.post("/create/:projectId", authMiddleware, permissionMiddleware('create_task'), upload.array('attachments', 5), async (req, res) => {
-    const { taskName, assignee, assigner, teamStatus, progress, startDate, dueDate, subtasks, comment } = req.body;
+router.post(
+  "/create/:projectId",
+  authMiddleware,
+  permissionMiddleware("create_task"),
+  upload.array("attachments", 5),
+  async (req, res) => {
+    const {
+      taskName,
+      assignee,
+      assigner,
+      teamStatus,
+      progress,
+      startDate,
+      dueDate,
+      subtasks,
+      comment,
+    } = req.body;
     const files = req.files;
 
-        
     const project = await Project.findById(req.params.projectId);
-    if (!project) return res.status(404).json({ message: "Project not found" });
+    if (!project)
+      return res.status(404).json({ message: "Project not found" });
 
-    // Generate task ID in format [Project ID]-XX
-
-const today = new Date();
-const yy = String(today.getFullYear()).slice(-2);
-const mm = String(today.getMonth() + 1).padStart(2, '0');
-const dd = String(today.getDate()).padStart(2, '0');
-const datePart = `${yy}${mm}${dd}`;
-const prefix = `TK${datePart}`;
+    // Generate task ID in format TKYYMMDD-0001
+    const today = new Date();
+    const yy = String(today.getFullYear()).slice(-2);
+    const mm = String(today.getMonth() + 1).padStart(2, "0");
+    const dd = String(today.getDate()).padStart(2, "0");
+    const datePart = `${yy}${mm}${dd}`;
+    const prefix = `TK${datePart}`;
 
     const latestTask = await Task.findOne({
-        taskId: new RegExp(`^${prefix}-\\d{4}$`)
-}).sort({ taskId: -1 });
+      taskId: new RegExp(`^${prefix}-\\d{4}$`),
+    }).sort({ taskId: -1 });
 
-    let sequenceNumber = '0001';
+    let sequenceNumber = "0001";
     if (latestTask) {
-        const lastSequence = parseInt(latestTask.taskId.split('-')[1]);
-        sequenceNumber = String(lastSequence + 1).padStart(4, '0');
+      const lastSequence = parseInt(latestTask.taskId.split("-")[1]);
+      sequenceNumber = String(lastSequence + 1).padStart(4, "0");
     }
 
     const taskId = `${prefix}-${sequenceNumber}`;
- 
-    const newTask = new Task({
-        taskName,
-        taskId,
-        assignee,
-        assigner: req.user.id,
-        teamStatus,
-        progress,
-        startDate,
-        dueDate,
-        subtasks,
-        comments: [] // Initialize empty comments array
-    });   
 
-    console.log('newTask', newTask);
+    const newTask = new Task({
+      taskName,
+      taskId,
+      assignee,
+      assigner: req.user.id,
+      teamStatus,
+      progress,
+      startDate,
+      dueDate,
+      subtasks,
+      comments: [], // Initialize empty comments array
+    });
+
+    console.log("newTask", newTask);
 
     try {
-        await newTask.save();
-        project.tasks.push(newTask._id); 
-        
-        // Update project status based on tasks
-        if (project.tasks.length > 0) {
-            project.status = "In Progress";
-        }
-        
-        await project.save();
+      await newTask.save();
+      project.tasks.push(newTask._id);
 
-        // Create comment if provided
-        if (comment) {
-            const attachments = files ? files.map(file => ({
-                fileName: file.originalname,
-                fileUrl: file.path,
-                fileType: file.mimetype,
-                fileSize: file.size
-            })) : [];
+      // Update project status based on tasks
+      if (project.tasks.length > 0) {
+        project.status = "In Progress";
+      }
 
-            const newComment = new Comment({
-                content: comment,
-                user: req.user.id,
-                task: newTask._id,
-                attachments
-            });
+      await project.save();
 
-            await newComment.save();
-            newTask.comments.push(newComment._id); // Use push instead of assignment
-            await newTask.save();
-        }
+      // ✅ Create comment if provided
+      if (comment) {
+        const attachments = files
+          ? files.map((file) => ({
+              fileName: file.originalname,
+              fileUrl: file.path,
+              fileType: file.mimetype,
+              fileSize: file.size,
+            }))
+          : [];
 
-        await logActivity(req.user.id, "Created Task", newTask._id, "task", `Task ID: ${newTask.taskName}`, req.user.parentId);
-
-        // Populate the task with all related data
-        const populatedTask = await Task.findById(newTask._id)
-            .populate('assignee', 'name email location')
-            .populate({
-                path: 'subtasks',
-                populate: {
-                    path: 'assignee',
-                    select: 'name email location'
-                },
-                select: 'name assignee status submission'
-            })
-            .populate({
-                path: 'comments',
-                populate: {
-                    path: 'user',
-                    select: 'name email'
-                }
-            });
-
-        // Send notification to the assignee
-        if (assignee) {
-            await sendNotification(
-                assignee,
-                'New Task Assigned',
-                `New task has been assigned: "${taskName}" in project "${project.projectName}".`,
-                'task',
-                newTask._id
-            );
-        }
-        
-        // Send notification to the team
-        if (teamStatus) {
-            await sendNotificationsToTeam(
-                teamStatus,
-                'New Task Created',
-                `A new task "${taskName}" has been created in project "${project.projectName}".`,
-                'task',
-                newTask._id
-            );
-        }
-
-        res.status(201).json({ 
-            message: "Task created successfully", 
-            task: populatedTask 
+        const newComment = new Comment({
+          content: comment,
+          user: req.user.id,
+          task: newTask._id,
+          attachments,
         });
+
+        await newComment.save();
+        newTask.comments.push(newComment._id);
+        await newTask.save();
+      }
+
+      // ✅ Log activity
+      await logActivity(
+        req.user.id,
+        "Created Task",
+        newTask._id,
+        "task",
+        `Task ID: ${newTask.taskName}`,
+        req.user.parentId
+      );
+
+      // ✅ Populate the task
+      const populatedTask = await Task.findById(newTask._id)
+        .populate("assignee", "name email location")
+        .populate({
+          path: "subtasks",
+          populate: {
+            path: "assignee",
+            select: "name email location",
+          },
+          select: "name assignee status submission",
+        })
+        .populate({
+          path: "comments",
+          populate: {
+            path: "user",
+            select: "name email",
+          },
+        });
+
+      // ✅ Send in-app notifications
+      if (assignee) {
+        await sendNotification(
+          assignee,
+          "New Task Assigned",
+          `New task has been assigned: "${taskName}" in project "${project.projectName}".`,
+          "task",
+          newTask._id
+        );
+      }
+
+      if (teamStatus) {
+        await sendNotificationsToTeam(
+          teamStatus,
+          "New Task Created",
+          `A new task "${taskName}" has been created in project "${project.projectName}".`,
+          "task",
+          newTask._id
+        );
+      }
+
+      // ✅ ✅ EMAIL INTEGRATION START
+      const assignerUser = await User.findById(req.user.id).select("name email");
+
+      if (assignee) {
+        const assigneeUser = await User.findById(assignee).select("name email");
+        const emailSubject = "📌 New Task Assigned";
+        const emailBody =
+          `Hi ${assigneeUser?.name || "User"},\n\n` +
+          `You have been assigned a new task in the project "${project.projectName}".\n\n` +
+          `Task Details:\n` +
+          `- Task: ${taskName}\n` +
+          `- Task ID: ${newTask.taskId}\n` +
+          `- Start Date: ${startDate || "N/A"}\n` +
+          `- Due Date: ${dueDate || "N/A"}\n` +
+          `- Assigned By: ${assignerUser?.name || "Manager"}\n\n` +
+          `Please check your Task Dashboard for more details.\n\n` +
+          `Regards,\nBluparrot Team`;
+
+        try {
+          if (assigneeUser?.email) {
+            await sendTaskEmail(assigneeUser.email, emailSubject, emailBody);
+          }
+        } catch (emailError) {
+          console.error("❌ Failed to send task email:", emailError);
+        }
+      }
+      // ✅ ✅ EMAIL INTEGRATION END
+
+      res.status(201).json({
+        message: "Task created successfully",
+        task: populatedTask,
+      });
     } catch (error) {
-        console.log("Error creating task", error);
-        res.status(500).json({ message: "Error creating task", error });
+      console.log("Error creating task", error);
+      res.status(500).json({ message: "Error creating task", error });
     }
-});
+  }
+);
+
 
 // get tasks and subtasks
 router.get("/view/:projectId", authMiddleware, async (req, res) => {
@@ -445,31 +499,26 @@ router.get("/user-tasks", authMiddleware, async (req, res) => {
 router.post("/add/subtask/:taskId", authMiddleware, permissionMiddleware('create_subtask'), async (req, res) => {
     try {
         const { taskId } = req.params;
-        const { name, assignee, submission, status, startDate, dueDate } = req.body;
-
-        console.log('startDate and endDate', startDate, dueDate)
+    const { name, assignee, submission, status } = req.body;
 
         // Find the task
         const task = await Task.findById(taskId).populate('subtasks', 'name assignee status submission');
         
-        if (!task) {
+    if (!task) {
             return res.status(404).json({
                 success: false,
                 message: "Task not found"
             });
-        }
+    }
 
         // Create the subtask
         const subtask = new Subtask({
-            name,
-            assignee,
-            assigner: req.user.id,
+        name,
+        assignee,
             task: taskId,
-            status,     
+        status,     
             createdBy: req.user.id,
-            submission,
-            startDate,
-            dueDate
+            submission
         });
         
         await subtask.save();
@@ -485,10 +534,11 @@ router.post("/add/subtask/:taskId", authMiddleware, permissionMiddleware('create
         const completedSubtasks = subtasks.filter(st => st.status === "Completed").length;
         const inProgressSubtasks = subtasks.filter(st => st.status === "In Progress").length;
 
-        console.log('completed subtask', completedSubtasks);
-        console.log('in progress subtask', inProgressSubtasks);
         
-        const progress = Math.round((completedSubtasks/totalSubtasks)*100);
+        // Calculate progress: (completed + 0.5 * inProgress) / total * 100
+        // const progress = totalSubtasks > 0 ? Math.round(((completedSubtasks + (0.5 * inProgressSubtasks)) / totalSubtasks) * 100) : 0;
+        
+       const progress = Math.round((completedSubtasks/totalSubtasks)*100);
 
         // Update task progress and status
         task.progress = progress;
@@ -520,13 +570,31 @@ router.post("/add/subtask/:taskId", authMiddleware, permissionMiddleware('create
                 const allTasksCompleted = projectTasks.every(task => task.teamStatus === "Completed");
                 const anyTaskInProgress = projectTasks.some(task => task.teamStatus === "In Progress");
                 
+                // if (allTasksCompleted) {
+                //     project.status = "Completed";
+                // } else if (anyTaskInProgress) {
+                //     project.status = "In Progress";
+                // } else {
+                //     project.status = "Pending";
+                // }
+
                 if (allTasksCompleted) {
                     project.status = "Completed";
-                } else if (anyTaskInProgress) {
+                } else{
                     project.status = "In Progress";
-                } else {
-                    project.status = "In Progress";
-                }
+                } 
+                
+                // Log the status update for debugging
+                console.log('Project status update from subtask creation:', {
+                    projectId: project._id,
+                    oldStatus: project.status,
+                    newStatus: project.status,
+                    allTasksCompleted,
+                    anyTaskInProgress,
+                    totalTasks: projectTasks.length,
+                    completedTasks: projectTasks.filter(t => t.teamStatus === "Completed").length,
+                    inProgressTasks: projectTasks.filter(t => t.teamStatus === "In Progress").length
+                });
                 
                 await project.save();
             }
@@ -542,6 +610,22 @@ router.post("/add/subtask/:taskId", authMiddleware, permissionMiddleware('create
                 subtask._id
             );
         }
+
+         if (assignee) {
+        const assigneeUser = await User.findById(assignee);
+        if (assigneeUser && assigneeUser.email) {
+          try {
+            await sendTaskEmail(
+              assigneeUser.email,
+              "🆕 Subtask Assigned",
+              `Hi ${assigneeUser.name || ""},\n\nYou have been assigned a new subtask:\n\n📌 Subtask: ${name}\n Task: ${task.taskName}\n Status: ${task.teamStatus}\n Due Date: ${submission || "Not specified"}\n\nProject: ${project?.projectName || "N/A"}\n\nRegards,\nBluparrot Team`
+            );
+          } catch (mailErr) {
+            console.error("📨 Error sending subtask email to assignee:", mailErr.message);
+          }
+        }
+      }
+        
         
         // Log the activity
         await logActivity(req.user.id, "Created Subtask", subtask._id, "subtask", `Subtask ID: Subtask: ${name} form Task: ${task.taskName}`, req.user.parentId);
@@ -575,14 +659,12 @@ router.put("/update/:taskId", authMiddleware, permissionMiddleware('edit_task'),
             return res.status(404).json({ message: "Task not found" });
         }
 
-        // Check if task is already completed
+        // Prevent editing completed task
         if (task.teamStatus === "Completed") {
-            return res.status(400).json({ 
-                message: "Cannot modify a completed task" 
-            });
+            return res.status(400).json({ message: "Cannot modify a completed task" });
         }
 
-        // Store old values for comparison
+        // Store old values
         const oldValues = {
             taskName: task.taskName,
             assignee: task.assignee,
@@ -592,23 +674,19 @@ router.put("/update/:taskId", authMiddleware, permissionMiddleware('edit_task'),
             dueDate: task.dueDate
         };
 
-        // Check if the assignee has changed
         const assigneeChanged = assignee && task.assignee && assignee.toString() !== task.assignee.toString();
+        const statusChanged = teamStatus && task.teamStatus !== teamStatus;
+        const isCompleted = teamStatus === "Completed";
 
-        // If assignee is being changed, update all subtasks to the new assignee
+        // Update subtasks if assignee changed
         if (assigneeChanged || assignee) {
-            // Update all subtasks to have the same assignee as the main task
             await Subtask.updateMany(
                 { _id: { $in: task.subtasks } },
                 { $set: { assignee: assignee } }
             );
         }
 
-        // Check if the status has changed to Completed
-        const statusChanged = teamStatus && task.teamStatus !== teamStatus;
-        const isCompleted = teamStatus === "Completed";
-
-        // Update only the fields that are provided in the request
+        // Update task fields
         if (assignee) task.assignee = assignee;
         if (taskName) task.taskName = taskName;
         if (assigner) task.assigner = req.user.id;
@@ -617,127 +695,125 @@ router.put("/update/:taskId", authMiddleware, permissionMiddleware('edit_task'),
         if (startDate) task.startDate = startDate;
         if (dueDate) task.dueDate = dueDate;
 
-        // If task is being marked as completed
+        // If completed
         if (isCompleted && statusChanged) {
-            // Set completion date to current date
             task.completionDate = new Date();
-            
-            // Update all subtasks to completed
-            if (task.subtasks && task.subtasks.length > 0) {
+            if (task.subtasks?.length > 0) {
                 await Subtask.updateMany(
                     { _id: { $in: task.subtasks } },
                     { $set: { status: "Completed" } }
                 );
             }
-            // Set task progress to 100%
             task.progress = 100;
         }
 
         await task.save();
 
-        // Find the parent project and update its progress and status
+        // Update project progress
         const project = await Project.findOne({ tasks: taskId });
         if (project) {
-            // Get all tasks for this project
             const projectTasks = await Task.find({ _id: { $in: project.tasks } });
-            
-            if (projectTasks.length > 0) {
-                // Calculate project progress based on task progress
-                const totalProgress = projectTasks.reduce((sum, task) => sum + task.progress, 0);
-                const projectProgress = Math.round(totalProgress / projectTasks.length);
-                
-                // Update project status based on all tasks
-                const allTasksCompleted = projectTasks.every(task => task.teamStatus === "Completed");
-                const anyTaskInProgress = projectTasks.some(task => task.teamStatus === "In Progress");
-                
-                if (allTasksCompleted) {
-                    project.status = "Completed";
-                } else if (anyTaskInProgress) {
-                    project.status = "In Progress";
-                } else {
-                    project.status = "In Progress";
-                }
-                
-                await project.save();
-            }
+            const totalProgress = projectTasks.reduce((sum, task) => sum + task.progress, 0);
+            const projectProgress = Math.round(totalProgress / projectTasks.length);
+
+            const allTasksCompleted = projectTasks.every(t => t.teamStatus === "Completed");
+            const anyTaskInProgress = projectTasks.some(t => t.teamStatus === "In Progress");
+
+            if (allTasksCompleted) project.status = "Completed";
+            else if (anyTaskInProgress) project.status = "In Progress";
+            else project.status = "In Progress";
+
+            await project.save();
         }
 
-        // Find the admin user
+        // Find admin
         const admin = await User.findOne({ role: "admin" });
-        
-        // Send notification to admin
-        if (admin) {
-            let changes = [];
-            if (taskName && taskName !== oldValues.taskName) {
-                changes.push(`Task name changed from "${oldValues.taskName}" to "${taskName}"`);
-            }
-            if (assigneeChanged) {
-                changes.push(`Task assigned to new user`);
-            }
-            if (teamStatus && teamStatus !== oldValues.teamStatus) {
-                changes.push(`Task status changed to ${teamStatus}`);
-            }
-            if (progress && progress !== oldValues.progress) {
-                changes.push(`Task progress updated to ${progress}%`);
-            }
-            if (startDate && startDate !== oldValues.startDate) {
-                changes.push(`Task start date updated`);
-            }
-            if (dueDate && dueDate !== oldValues.dueDate) {
-                changes.push(`Task due date updated`);
-            }
 
-            if (changes.length > 0) {
-                await sendNotification(
-                    admin._id,
-                    'Task Updated',
-                    `Task "${taskName || task.taskName}" has been updated: ${changes.join(", ")}`,
-                    'task',
-                    task._id
-                );
-            }
-        }
+        // Prepare change log
+        let changes = [];
+        if (taskName && taskName !== oldValues.taskName) changes.push(`Name changed`);
+        if (assigneeChanged) changes.push(`Reassigned`);
+        if (teamStatus && teamStatus !== oldValues.teamStatus) changes.push(`Status: ${teamStatus}`);
+        if (progress && progress !== oldValues.progress) changes.push(`Progress: ${progress}%`);
+        if (startDate && startDate !== oldValues.startDate) changes.push(`Start Date updated`);
+        if (dueDate && dueDate !== oldValues.dueDate) changes.push(`Due Date updated`);
 
-        // Send notification to task assignee if they exist and have changed
-        if (task.assignee && assigneeChanged) {
+        // Notify admin about task update
+        if (admin && changes.length > 0) {
             await sendNotification(
-                task.assignee,
-                'Task Assigned',
-                `Task "${taskName || task.taskName}" has been assigned.`,
+                admin._id,
+                'Task Updated',
+                `Task "${taskName || task.taskName}" updated: ${changes.join(", ")}`,
                 'task',
                 task._id
             );
         }
 
-        // Send notification to manager if task is completed
-        if (isCompleted && statusChanged && task.assignee) {
+        // Notify new assignee via notification + email
+        if (assignee && assigneeChanged) {
+            const assigneeUser = await User.findById(assignee).select("name email");
+            const assignerUser = await User.findById(req.user.id).select("name email");
+            await sendNotification(
+                assignee,
+                'Task Assigned',
+                `Task "${taskName || task.taskName}" has been reassigned to you.`,
+                'task',
+                task._id
+            );
+
+            // ✅ Send Email to New Assignee
+            if (assigneeUser?.email) {
+                const message =
+                    `Hi ${assigneeUser.name || "User"},\n\n` +
+                    `You have been reassigned a task:\n` +
+                    `Task: ${taskName || task.taskName}\n` +
+                    `Project: ${project?.projectName || "N/A"}\n` +
+                    `Due Date: ${dueDate || "Not specified"}\n` +
+                    `Assigned by: ${assignerUser?.name || "System"}\n\n` +
+                    `Regards,\nSGC Team`;
+                await sendTaskEmail(assigneeUser.email, "📌 Task Reassigned", message);
+            }
+        }
+
+        // If completed — notify manager/admin
+        if (isCompleted && statusChanged) {
+            const assignerUser = await User.findById(task.assigner).select("name email");
+            const assigneeUser = await User.findById(task.assignee).select("name email");
+
             await sendNotificationToManager(
                 task.assignee,
                 'Task Completed',
-                `The task "${task.taskName}" has been completed.`,
+                `The task "${task.taskName}" has been marked as completed.`,
                 'task',
                 task._id
             );
+
+            // ✅ Send Email to Admin / Manager
+            if (admin?.email) {
+                const message =
+                    `Hi ${admin.name || "Manager"},\n\n` +
+                    `The task "${task.taskName}" has been completed by ${assigneeUser?.name || "User"}.\n\n` +
+                    `Project: ${project?.projectName || "N/A"}\n` +
+                    `Completed on: ${new Date().toLocaleString()}\n\n` +
+                    `Regards,\nBluparrot Team`;
+                await sendTaskEmail(admin.email, "✅ Task Completed", message);
+            }
         }
 
-        // Populate the updated task with assignee details
         const updatedTask = await Task.findById(taskId)
             .populate('assignee', 'name email location')
             .populate('assigner', 'name email')
             .populate({
                 path: 'subtasks',
-                populate: {
-                    path: 'assignee',
-                    select: 'name email location'
-                },
+                populate: { path: 'assignee', select: 'name email location' },
                 select: 'name assignee status submission'
             });
 
         await logActivity(req.user.id, "Updated Task", updatedTask._id, "task", `Task ID: ${updatedTask.taskName}`, req.user.parentId);
 
-        res.status(200).json({ 
-            message: "Task updated successfully", 
-            task: updatedTask 
+        res.status(200).json({
+            message: "Task updated successfully (with email notifications)",
+            task: updatedTask
         });
     } catch (error) {
         console.error("Error updating task:", error);
@@ -745,77 +821,110 @@ router.put("/update/:taskId", authMiddleware, permissionMiddleware('edit_task'),
     }
 });
 
+
 // Delete task and its subtasks by ID
-router.delete("/delete/:taskId", authMiddleware, permissionMiddleware('delete_task'), async (req, res) => {
+router.delete(
+  "/delete/:taskId",
+  authMiddleware,
+  permissionMiddleware("delete_task"),
+  async (req, res) => {
     try {
-        
-       console.log("enter in delete task");
-    const taskId = req.params.taskId;
+      console.log("enter in delete task");
+      const taskId = req.params.taskId;
 
-        // Find the task first
-        const task = await Task.findById(taskId);
-        
-        if (!task) {
-            return res.status(404).json({ message: "Task not found" });
+      // Find the task first
+      const task = await Task.findById(taskId).populate("assignee", "email name");
+      if (!task) {
+        return res.status(404).json({ message: "Task not found" });
+      }
+
+      // Find the project that contains this task
+      const project = await Project.findOne({ tasks: taskId });
+      if (project) {
+        // Remove the task from the project's tasks array
+        project.tasks = project.tasks.filter((t) => t.toString() !== taskId);
+
+        // Update project status based on remaining tasks
+        if (project.tasks.length === 0) {
+          project.status = "In Progress";
+        } else {
+          const remainingTasks = await Task.find({ _id: { $in: project.tasks } });
+          const allTasksCompleted = remainingTasks.every(
+            (task) => task.teamStatus === "Completed"
+          );
+          const anyTaskInProgress = remainingTasks.some(
+            (task) => task.teamStatus === "In Progress"
+          );
+
+          if (allTasksCompleted) {
+            project.status = "Completed";
+          } else if (anyTaskInProgress) {
+            project.status = "In Progress";
+          } else {
+            project.status = "In Progress";
+          }
         }
 
-        // Find the project that contains this task
-        const project = await Project.findOne({ tasks: taskId });
-        if (project) {
-            // Remove the task from the project's tasks array
-            project.tasks = project.tasks.filter(t => t.toString() !== taskId);
-            
-            // Update project status based on remaining tasks
-            if (project.tasks.length === 0) {
-                project.status = "In Progress";
-            } else {
-                // Get remaining tasks
-                const remainingTasks = await Task.find({ _id: { $in: project.tasks } });
-                const allTasksCompleted = remainingTasks.every(task => task.teamStatus === "Completed");
-                const anyTaskInProgress = remainingTasks.some(task => task.teamStatus === "In Progress");
-                
-                if (allTasksCompleted) {
-                    project.status = "Completed";
-                } else if (anyTaskInProgress) {
-                    project.status = "In Progress";
-                } else {
-                    project.status = "In Progress";
-                }
-            }
-            
-            await project.save();
-        }
+        await project.save();
+      }
 
-        // Delete all subtasks associated with this task
-        if (task.subtasks && task.subtasks.length > 0) {
-            await Subtask.deleteMany({ _id: { $in: task.subtasks } });
-        }
+      // Delete all subtasks associated with this task
+      if (task.subtasks && task.subtasks.length > 0) {
+        await Subtask.deleteMany({ _id: { $in: task.subtasks } });
+      }
 
-    
-        // Send notification to task assignee if they exist
-        if (task.assignee) {
-            await sendNotification(
-                task.assignee,
-                'Task Deleted',
-                `Task "${task.taskName}" has been deleted from project "${project.projectName}".`,
-                'task',
-                taskId
-            );
-        }
- 
-        // Delete the task itself
-        await Task.findByIdAndDelete(taskId);
+      // Send notification and email to task assignee if they exist
+      if (task.assignee) {
+        const assigneeEmail = task.assignee.email;
 
-        await logActivity(req.user.id, "Deleted Task", taskId, "task", `Task ID: ${task.taskName}`, req.user.parentId);
+        // In-app notification
+        await sendNotification(
+          task.assignee._id,
+          "Task Deleted",
+          `Task "${task.taskName}" has been deleted from project "${project?.projectName || "N/A"}".`,
+          "task",
+          taskId
+        );
 
-        res.status(200).json({ 
-            message: "Task and associated subtasks deleted successfully" 
-        });
+        // Email notification
+        await sendEmail(
+          assigneeEmail,
+          "Task Deleted Notification",
+          `
+          Hi ${task.assignee.name || "User"},
+          
+          The task "${task.taskName}" has been deleted from the project "${project?.projectName || "N/A"}".
+          
+          Please contact your project manager if you have any questions.
+          
+          Regards,  
+          Bluparrot Team
+          `
+        );
+      }
+
+      // Delete the task itself
+      await Task.findByIdAndDelete(taskId);
+
+      await logActivity(
+        req.user.id,
+        "Deleted Task",
+        taskId,
+        "task",
+        `Task Name: ${task.taskName}`,
+        req.user.parentId
+      );
+
+      res.status(200).json({
+        message: "Task, associated subtasks, and email notification processed successfully",
+      });
     } catch (error) {
-        console.error("Error deleting task:", error);
-        res.status(500).json({ message: "Error deleting task", error: error.message });
+      console.error("Error deleting task:", error);
+      res.status(500).json({ message: "Error deleting task", error: error.message });
     }
-});
+  }
+);
+
 
 // Delete subtask and remove its reference from parent task
 router.delete("/delete/subtask/:subtaskId", authMiddleware, permissionMiddleware('delete_subtask'), async (req, res) => {
@@ -1933,7 +2042,7 @@ router.post("/:taskId/dependencies", authMiddleware, async (req, res) => {
       `- Task: ${mainTask.taskName}\n` +
       `- Assigned By: ${mainTask.assigner?.name || "Manager"}\n` +
       `Please check your Dependency list for more details.\n\n` +
-      `Regards,\nSGC Team`;
+      `Regards,\nBluparrot Team`;
 
     try {
       // ✅ Send email to assigned person
@@ -2008,7 +2117,7 @@ router.put("/:taskId/dependencies/status", authMiddleware, async (req, res) => {
       `- Description: ${dependency.description || "No description"}\n` +
       `- Updated Status: ${status}\n` +
       `- Updated By: ${assignedUser?.name || "User"}\n\n` +
-      `Regards,\nSGC Team`;
+      `Regards,\nBluparrot Team`;
 
     try {
       // ✅ Send email to assigner
